@@ -8,6 +8,11 @@ yarn-error.log*
 .wrangler/
 dist/
 
+# Cloudflare Workers binaries
+**/workerd.exe
+**/workerd
+node_modules/@cloudflare/workerd-*/
+
 # Environment variables
 .env
 .env.local
