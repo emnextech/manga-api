@@ -1,0 +1,19 @@
+name = "emnex-manga-api"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+ALLOWED_ORIGIN = "*"
+
+# Optional: Set a secret token for protected endpoints
+# SECRET_TOKEN = "your-secret-token-here"
+
+# Development settings
+[dev]
+port = 8788
+local_protocol = "http"
+
+# Production settings (optional)
+# [env.production]
+# SECRET_TOKEN = "your-production-secret"
+# ALLOWED_ORIGIN = "https://yourdomain.com"

@@ -1,0 +1,26 @@
+{
+  "name": "emnex-manga-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for Manga API - Serves manga content from multiple providers",
+  "main": "worker.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test-endpoints.js",
+    "test:watch": "nodemon test-endpoints.js"
+  },
+  "keywords": [
+    "cloudflare",
+    "worker",
+    "manga",
+    "api",
+    "mangadex",
+    "mangapill",
+    "consumet"
+  ],
+  "author": "Emnex Tech",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
