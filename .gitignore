@@ -20,6 +20,7 @@ node_modules/@cloudflare/workerd-*/
 .env.test.local
 .env.production.local
 
+
 # IDE
 .vscode/
 .idea/
@@ -67,3 +68,5 @@ coverage/
 # Temporary folders
 tmp/
 temp/
+
+

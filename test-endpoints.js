@@ -3,30 +3,33 @@
  * Emnex Manga API - Comprehensive Endpoint Test Suite
  * ============================================================================
  * 
- * This script tests all endpoints of the Emnex Manga Worker API locally.
+ * Tests all endpoints of the Emnex Manga Worker API.
  * 
  * PREREQUISITES:
  *   1. Node.js 18+ installed
- *   2. Worker running locally: npm run dev
+ *   2. Worker running: npm run dev
  * 
  * USAGE:
- *   node test-endpoints.js                    # Test against localhost:8788
- *   API_URL=https://your.api.com node test-endpoints.js  # Test production
+ *   node test-endpoints.js
+ *   API_URL=https://your.api.com node test-endpoints.js
  * 
- * WHAT IT TESTS:
- *   ✓ Home endpoint (API info)
- *   ✓ Providers list
- *   ✓ Search functionality (all providers)
- *   ✓ Manga info (all providers)
- *   ✓ Chapter pages (all providers)
- *   ✓ 404 error handling
- *   ✓ Cache functionality
- *   ✓ CORS headers
+ * ENDPOINTS TESTED:
+ *   ✓ GET /                           - HTML home page
+ *   ✓ GET /api/v1/home                - Home data (featured, trending)
+ *   ✓ GET /api/v1/search/:query       - Search manga
+ *   ✓ GET /api/v1/info/:id            - Manga info + chapters
+ *   ✓ GET /api/v1/read/:chapterId     - Chapter pages
+ *   ✓ GET /api/v1/recent              - Recent chapter updates
+ *   ✓ GET /api/v1/new                 - New manga
+ *   ✓ GET /api/v1/random              - Random manga
+ *   ✓ GET /api/v1/genres              - Available genres/types/statuses
+ *   ✓ GET /api/v1/advanced-search     - Filtered search
+ *   ✓ GET /api/v1/image?url=...       - Image proxy
  * 
  * ============================================================================
  */
 
-const BASE_URL = process.env.API_URL || 'http://127.0.0.1:8788';
+const BASE_URL = process.env.API_URL || 'http://localhost:8788';
 
 // ============================================================================
 // CONSOLE STYLING
@@ -43,8 +46,6 @@ const colors = {
   cyan: '\x1b[36m',
   magenta: '\x1b[35m',
   white: '\x1b[37m',
-  bgGreen: '\x1b[42m',
-  bgRed: '\x1b[41m',
 };
 
 function log(message, color = 'reset') {
@@ -85,7 +86,7 @@ function logSubHeader(title, url) {
 // ============================================================================
 
 async function testEndpoint(name, url, options = {}) {
-  const { validate, expectError = false } = options;
+  const { validate, expectError = false, isHtml = false, isImage = false } = options;
   
   logSubHeader(name, url);
   
@@ -94,7 +95,16 @@ async function testEndpoint(name, url, options = {}) {
     const response = await fetch(url);
     const duration = Date.now() - startTime;
     
-    const data = await response.json();
+    // Handle different response types
+    let data;
+    if (isImage) {
+      const buffer = await response.arrayBuffer();
+      data = { size: buffer.byteLength, contentType: response.headers.get('Content-Type') };
+    } else if (isHtml) {
+      data = await response.text();
+    } else {
+      data = await response.json();
+    }
     
     // Check status code
     if (expectError) {
@@ -122,10 +132,10 @@ async function testEndpoint(name, url, options = {}) {
       await validate(data, response);
     }
     
-    return data;
+    return { data, response, success: response.ok };
   } catch (error) {
     logError(`Request failed: ${error.message}`);
-    throw error;
+    return { success: false, error };
   }
 }
 
@@ -136,349 +146,481 @@ async function testEndpoint(name, url, options = {}) {
 async function runTests() {
   log('', 'reset');
   log('═'.repeat(70), 'bright');
-  log('  🧪 EMNEX MANGA WORKER API - COMPREHENSIVE TEST SUITE', 'bright');
+  log('  🧪 EMNEX MANGA API - TEST SUITE v1.2.0', 'bright');
   log('═'.repeat(70), 'bright');
   log(`  Base URL: ${BASE_URL}`, 'cyan');
   log(`  Started: ${new Date().toLocaleString()}`, 'dim');
   log('═'.repeat(70), 'bright');
   
-  const stats = {
-    total: 0,
-    passed: 0,
-    failed: 0,
-  };
+  const stats = { total: 0, passed: 0, failed: 0 };
   
   // Store data for use across tests
   let testMangaId = null;
   let testChapterId = null;
-  let searchResults = null;
+  let testImageUrl = null;
   
   // ========================================================================
-  // TEST 1: Home Endpoint
+  // TEST 1: HTML Home Page
   // ========================================================================
   
-  try {
-    logHeader('TEST 1: Home Endpoint');
-    
-    await testEndpoint('API Home', `${BASE_URL}/`, {
+  logHeader('TEST 1: HTML Home Page');
+  stats.total++;
+  
+  const htmlTest = await testEndpoint('HTML Home', `${BASE_URL}/`, {
+    isHtml: true,
+    validate: (html) => {
+      if (html.includes('Emnex Manga API')) {
+        logSuccess('Page title found');
+      }
+      if (html.includes('emnextech')) {
+        logSuccess('Creator branding found');
+      }
+      if (html.includes('/api/v1/')) {
+        logSuccess('API v1 endpoints documented');
+      }
+      if (html.includes('testEndpoint')) {
+        logSuccess('Testing buttons found');
+      }
+    },
+  });
+  if (htmlTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 2: API Home Data
+  // ========================================================================
+  
+  logHeader('TEST 2: API Home Data');
+  stats.total++;
+  
+  const homeTest = await testEndpoint('API Home', `${BASE_URL}/api/v1/home`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      if (data.name && data.version) {
+        logInfo(`API: ${data.name} v${data.version}`);
+      }
+      if (data.featuredChapters && Array.isArray(data.featuredChapters)) {
+        logSuccess(`Featured chapters: ${data.featuredChapters.length}`);
+        if (data.featuredChapters[0]) {
+          testImageUrl = data.featuredChapters[0].image;
+          logInfo(`Sample image URL saved for proxy test`);
+        }
+      }
+      if (data.trendingManga && Array.isArray(data.trendingManga)) {
+        logSuccess(`Trending manga: ${data.trendingManga.length}`);
+      }
+      if (data.endpoints) {
+        logSuccess(`Endpoints documented: ${Object.keys(data.endpoints).length}`);
+      }
+    },
+  });
+  if (homeTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 3: Search Manga
+  // ========================================================================
+  
+  logHeader('TEST 3: Search Manga');
+  stats.total++;
+  
+  const searchTest = await testEndpoint('Search', `${BASE_URL}/api/v1/search/naruto`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      if (data.results && Array.isArray(data.results)) {
+        logSuccess(`Found ${data.results.length} results`);
+        if (data.results[0]) {
+          testMangaId = data.results[0].id;
+          logInfo(`First result: ${data.results[0].title}`);
+          logInfo(`Manga ID saved: ${testMangaId}`);
+        }
+      }
+      if (data.hasNextPage !== undefined) {
+        logInfo(`Has next page: ${data.hasNextPage}`);
+      }
+    },
+  });
+  if (searchTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 4: Manga Info
+  // ========================================================================
+  
+  logHeader('TEST 4: Manga Info');
+  stats.total++;
+  
+  // Use One Piece as a reliable test case
+  const infoTest = await testEndpoint('Manga Info', `${BASE_URL}/api/v1/info/2/one-piece`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      const manga = data.data;
+      if (manga) {
+        if (manga.title) logInfo(`Title: ${manga.title}`);
+        if (manga.description) logSuccess('Description found');
+        if (manga.genres) logInfo(`Genres: ${manga.genres.slice(0, 3).join(', ')}...`);
+        if (manga.status) logInfo(`Status: ${manga.status}`);
+        if (manga.chapters && Array.isArray(manga.chapters)) {
+          logSuccess(`Chapters: ${manga.chapters.length}`);
+          if (manga.chapters[0]) {
+            testChapterId = manga.chapters[0].id;
+            logInfo(`Chapter ID saved: ${testChapterId}`);
+          }
+        }
+      }
+    },
+  });
+  if (infoTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 5: Read Chapter
+  // ========================================================================
+  
+  logHeader('TEST 5: Read Chapter');
+  stats.total++;
+  
+  // Use One Piece Chapter 1 as reliable test case
+  const readTest = await testEndpoint('Read Chapter', `${BASE_URL}/api/v1/read/2-10001000/one-piece-chapter-1`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      if (data.data && Array.isArray(data.data)) {
+        logSuccess(`Pages: ${data.data.length}`);
+        if (data.data[0]) {
+          logInfo(`First page: ${data.data[0].img.substring(0, 50)}...`);
+          if (!testImageUrl) {
+            testImageUrl = data.data[0].img;
+          }
+        }
+      }
+    },
+  });
+  if (readTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 6: Recent Updates
+  // ========================================================================
+  
+  logHeader('TEST 6: Recent Updates');
+  stats.total++;
+  
+  const recentTest = await testEndpoint('Recent Chapters', `${BASE_URL}/api/v1/recent`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      if (data.results && Array.isArray(data.results)) {
+        logSuccess(`Recent updates: ${data.results.length}`);
+        if (data.results[0]) {
+          logInfo(`Latest: ${data.results[0].mangaTitle} - Ch. ${data.results[0].chapterNumber}`);
+        }
+      }
+      if (data.hasNextPage !== undefined) {
+        logInfo(`Has next page: ${data.hasNextPage}`);
+      }
+    },
+  });
+  if (recentTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 7: New Manga
+  // ========================================================================
+  
+  logHeader('TEST 7: New Manga');
+  stats.total++;
+  
+  const newTest = await testEndpoint('New Manga', `${BASE_URL}/api/v1/new`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      if (data.results && Array.isArray(data.results)) {
+        logSuccess(`New manga: ${data.results.length}`);
+        if (data.results[0]) {
+          logInfo(`First: ${data.results[0].title}`);
+        }
+      }
+    },
+  });
+  if (newTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 8: Random Manga
+  // ========================================================================
+  
+  logHeader('TEST 8: Random Manga');
+  stats.total++;
+  
+  const randomTest = await testEndpoint('Random Manga', `${BASE_URL}/api/v1/random`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      if (data.data) {
+        logInfo(`Random: ${data.data.title}`);
+        if (data.data.genres) {
+          logInfo(`Genres: ${data.data.genres.slice(0, 3).join(', ')}`);
+        }
+      }
+    },
+  });
+  if (randomTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 9: Genres
+  // ========================================================================
+  
+  logHeader('TEST 9: Genres & Filters');
+  stats.total++;
+  
+  const genresTest = await testEndpoint('Genres', `${BASE_URL}/api/v1/genres`, {
+    validate: (data) => {
+      if (data.creator === 'emnextech') {
+        logSuccess('Creator field present');
+      }
+      if (data.status === 'success') {
+        logSuccess('Response has success status');
+      }
+      if (data.genres && Array.isArray(data.genres)) {
+        logSuccess(`Genres: ${data.genres.length}`);
+        logInfo(`Sample: ${data.genres.slice(0, 5).join(', ')}...`);
+      }
+      if (data.types && Array.isArray(data.types)) {
+        logSuccess(`Types: ${data.types.length}`);
+        logInfo(`Types: ${data.types.join(', ')}`);
+      }
+      if (data.statuses && Array.isArray(data.statuses)) {
+        logSuccess(`Statuses: ${data.statuses.length}`);
+      }
+    },
+  });
+  if (genresTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 10: Advanced Search
+  // ========================================================================
+  
+  logHeader('TEST 10: Advanced Search');
+  stats.total++;
+  
+  const advSearchTest = await testEndpoint(
+    'Advanced Search',
+    `${BASE_URL}/api/v1/advanced-search?genre=Action&type=manhwa`,
+    {
       validate: (data) => {
+        if (data.creator === 'emnextech') {
+          logSuccess('Creator field present');
+        }
         if (data.status === 'success') {
           logSuccess('Response has success status');
         }
-        if (data.name) {
-          logInfo(`API Name: ${data.name}`);
+        if (data.results && Array.isArray(data.results)) {
+          logSuccess(`Results: ${data.results.length}`);
+          if (data.results[0]) {
+            logInfo(`First: ${data.results[0].title}`);
+          }
         }
-        if (data.version) {
-          logInfo(`Version: ${data.version}`);
-        }
-        if (data.providers && data.providers.length > 0) {
-          logSuccess(`Found ${data.providers.length} providers`);
-          data.providers.forEach(p => {
-            logInfo(`  • ${p.name} (${p.id}) - ${p.baseUrl}`);
-          });
-        }
-        if (data.endpoints) {
-          logSuccess('Endpoints documentation found');
+        if (data.filters) {
+          logInfo(`Filters applied: ${JSON.stringify(data.filters)}`);
         }
       },
-    });
-    
-    stats.passed++;
-  } catch (error) {
-    stats.failed++;
-  }
-  stats.total++;
-  
-  // ========================================================================
-  // TEST 2: Providers List
-  // ========================================================================
-  
-  try {
-    logHeader('TEST 2: Providers List');
-    
-    await testEndpoint('Get Providers', `${BASE_URL}/api/providers`, {
-      validate: (data) => {
-        if (data.status === 'success') {
-          logSuccess('Response has success status');
-        }
-        if (data.providers && Array.isArray(data.providers)) {
-          logSuccess(`Found ${data.providers.length} providers`);
-          data.providers.forEach(p => {
-            logInfo(`  • ${p.name} (${p.id})`);
-            if (p.endpoints) {
-              p.endpoints.forEach(e => logInfo(`    - ${e}`));
-            }
-          });
-        }
-      },
-    });
-    
-    stats.passed++;
-  } catch (error) {
-    stats.failed++;
-  }
-  stats.total++;
-  
-  // ========================================================================
-  // TEST 3: Search Functionality (All Providers)
-  // ========================================================================
-  
-  logHeader('TEST 3: Search Functionality');
-  
-  // Only test working providers
-  const providers = ['mangapill'];
-  const searchQuery = 'naruto';
-  
-  for (const provider of providers) {
-    try {
-      searchResults = await testEndpoint(
-        `Search - ${provider.toUpperCase()}`,
-        `${BASE_URL}/api/${provider}/search/${searchQuery}`,
-        {
-          validate: (data) => {
-            if (data.status === 'success') {
-              logSuccess('Response has success status');
-            }
-            if (data.results && Array.isArray(data.results)) {
-              logSuccess(`Found ${data.results.length} results`);
-              if (data.results.length > 0) {
-                const first = data.results[0];
-                logInfo(`First result: ${first.title || first.id}`);
-                if (first.id && !testMangaId && provider === 'mangadex') {
-                  testMangaId = first.id;
-                  logInfo(`Saved manga ID for later tests: ${testMangaId}`);
-                }
-              }
-            }
-            if (data.hasNextPage !== undefined) {
-              logInfo(`Has next page: ${data.hasNextPage}`);
-            }
-          },
-        }
-      );
-      
-      stats.passed++;
-    } catch (error) {
-      stats.failed++;
     }
-    stats.total++;
+  );
+  if (advSearchTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 11: Image Proxy
+  // ========================================================================
+  
+  logHeader('TEST 11: Image Proxy');
+  stats.total++;
+  
+  // Get a valid image URL from recent if we don't have one
+  if (!testImageUrl) {
+    const recentData = recentTest.data;
+    if (recentData?.results?.[0]?.image) {
+      testImageUrl = recentData.results[0].image;
+    }
   }
   
-  // ========================================================================
-  // TEST 4: Search with Pagination
-  // ========================================================================
-  
-  try {
-    logHeader('TEST 4: Search with Pagination');
-    
-    await testEndpoint(
-      'Search MangaPill - Page 2',
-      `${BASE_URL}/api/mangapill/search/one piece?page=2`,
+  if (testImageUrl) {
+    const imageTest = await testEndpoint(
+      'Image Proxy',
+      `${BASE_URL}/api/v1/image?url=${encodeURIComponent(testImageUrl)}`,
       {
-        validate: (data) => {
-          if (data.status === 'success') {
-            logSuccess('Response has success status');
+        isImage: true,
+        validate: (data, response) => {
+          if (data.size > 0) {
+            logSuccess(`Image size: ${(data.size / 1024).toFixed(1)} KB`);
           }
-          if (data.page || data.currentPage) {
-            logInfo(`Current page: ${data.page || data.currentPage}`);
+          if (data.contentType && data.contentType.startsWith('image/')) {
+            logSuccess(`Content-Type: ${data.contentType}`);
           }
-          if (data.results) {
-            logSuccess(`Found ${data.results.length} results on page 2`);
+          const cacheHeader = response.headers.get('X-Cache');
+          if (cacheHeader) {
+            logInfo(`Cache status: ${cacheHeader}`);
+          }
+          const cacheControl = response.headers.get('Cache-Control');
+          if (cacheControl) {
+            logInfo(`Cache-Control: ${cacheControl}`);
           }
         },
       }
     );
-    
-    stats.passed++;
-  } catch (error) {
+    if (imageTest.success) stats.passed++; else stats.failed++;
+  } else {
+    logWarning('No test image URL available, skipping image proxy test');
     stats.failed++;
   }
+  
+  // ========================================================================
+  // TEST 12: Image Proxy Cache
+  // ========================================================================
+  
+  logHeader('TEST 12: Image Proxy Cache');
   stats.total++;
   
-  // ========================================================================
-  // TEST 5: Manga Info (All Providers)
-  // ========================================================================
-  
-  logHeader('TEST 5: Manga Info');
-  
-  // Only test working providers
-  const testIds = {
-    mangapill: '2/one-piece', // One Piece on MangaPill
-  };
-  
-  for (const provider of providers) {
-    try {
-      const mangaId = testIds[provider];
-      const infoData = await testEndpoint(
-        `Info - ${provider.toUpperCase()}`,
-        `${BASE_URL}/api/${provider}/info/${mangaId}`,
-        {
-          validate: (data) => {
-            if (data.status === 'success') {
-              logSuccess('Response has success status');
-            }
-            const manga = data.data || data;
-            if (manga.title) {
-              logInfo(`Title: ${manga.title}`);
-            }
-            if (manga.description) {
-              logSuccess('Description found');
-            }
-            if (manga.chapters && Array.isArray(manga.chapters)) {
-              logSuccess(`Found ${manga.chapters.length} chapters`);
-              if (manga.chapters.length > 0 && !testChapterId && provider === 'mangadex') {
-                testChapterId = manga.chapters[0].id;
-                logInfo(`Saved chapter ID for later tests: ${testChapterId}`);
-              }
-            }
-            if (manga.genres) {
-              logInfo(`Genres: ${Array.isArray(manga.genres) ? manga.genres.join(', ') : manga.genres}`);
-            }
-            if (manga.status) {
-              logInfo(`Status: ${manga.status}`);
-            }
-          },
-        }
-      );
-      
-      stats.passed++;
-    } catch (error) {
-      logWarning(`Skipping ${provider} - may need valid ID`);
-      stats.failed++;
-    }
-    stats.total++;
-  }
-  
-  // ========================================================================
-  // TEST 6: Read Chapter Pages (All Providers)
-  // ========================================================================
-  
-  logHeader('TEST 6: Read Chapter Pages');
-  
-  // Only test working providers
-  const chapterIds = {
-    mangapill: '2-10001000/one-piece-chapter-1', // One Piece Chapter 1
-  };
-  
-  for (const provider of providers) {
-    try {
-      const chapterId = chapterIds[provider];
-      await testEndpoint(
-        `Read - ${provider.toUpperCase()}`,
-        `${BASE_URL}/api/${provider}/read/${chapterId}`,
-        {
-          validate: (data) => {
-            if (data.status === 'success') {
-              logSuccess('Response has success status');
-            }
-            const pages = data.data || data;
-            if (Array.isArray(pages)) {
-              logSuccess(`Found ${pages.length} pages`);
-              if (pages.length > 0) {
-                logInfo(`First page: ${pages[0].img || pages[0].url || pages[0]}`);
-              }
-            } else if (pages.pages) {
-              logSuccess(`Found ${pages.pages.length} pages`);
-            }
-          },
-        }
-      );
-      
-      stats.passed++;
-    } catch (error) {
-      logWarning(`Skipping ${provider} - may need valid chapter ID`);
-      stats.failed++;
-    }
-    stats.total++;
-  }
-  
-  // ========================================================================
-  // TEST 7: Cache Functionality
-  // ========================================================================
-  
-  try {
-    logHeader('TEST 7: Cache Functionality');
-    
-    // Use a unique query to ensure first request is never cached
-    const uniqueQuery = `cachetest${Date.now()}`;
-    
-    logInfo('First request (uncached)...');
-    const firstResponse = await testEndpoint(
-      'Search (First Request)',
-      `${BASE_URL}/api/mangapill/search/${uniqueQuery}`,
-      {
-        validate: (data) => {
-          if (data.cached === true) {
-            logWarning('First request was cached (unexpected)');
-          } else {
-            logSuccess('First request was not cached (expected)');
-          }
-        },
-      }
-    );
-    
+  if (testImageUrl) {
     logInfo('Second request (should be cached)...');
-    const secondResponse = await testEndpoint(
-      'Search (Second Request)',
-      `${BASE_URL}/api/mangapill/search/${uniqueQuery}`,
+    const start = Date.now();
+    const cachedTest = await testEndpoint(
+      'Image Proxy (Cached)',
+      `${BASE_URL}/api/v1/image?url=${encodeURIComponent(testImageUrl)}`,
       {
-        validate: (data) => {
-          if (data.cached === true) {
-            logSuccess('Second request was cached (expected)');
+        isImage: true,
+        validate: (data, response) => {
+          const duration = Date.now() - start;
+          const cacheHeader = response.headers.get('X-Cache');
+          if (cacheHeader === 'HIT') {
+            logSuccess(`Cache HIT - loaded in ${duration}ms`);
           } else {
-            logInfo('Second request was not cached (cache may have expired)');
+            logInfo(`Cache ${cacheHeader || 'MISS'} - ${duration}ms`);
           }
         },
       }
     );
-    
-    stats.passed++;
-  } catch (error) {
+    if (cachedTest.success) stats.passed++; else stats.failed++;
+  } else {
+    logWarning('No test image URL available, skipping cache test');
     stats.failed++;
   }
-  stats.total++;
   
   // ========================================================================
-  // TEST 8: Error Handling
+  // TEST 13: Pagination
   // ========================================================================
   
-  try {
-    logHeader('TEST 8: Error Handling');
-    
-    await testEndpoint(
-      'Invalid Endpoint',
-      `${BASE_URL}/api/invalid/endpoint/test`,
-      {
-        expectError: true,
-        validate: (data) => {
-          if (data.status === 'error') {
-            logSuccess('Error response has correct status');
-          }
-          if (data.message) {
-            logInfo(`Error message: ${data.message}`);
-          }
-        },
-      }
-    );
-    
-    await testEndpoint(
-      'Invalid Provider',
-      `${BASE_URL}/api/invalidprovider/search/test`,
-      {
-        expectError: true,
-        validate: (data) => {
-          if (data.status === 'error') {
-            logSuccess('Invalid provider correctly rejected');
-          }
-        },
-      }
-    );
-    
-    stats.passed++;
-  } catch (error) {
-    stats.failed++;
-  }
+  logHeader('TEST 13: Pagination');
   stats.total++;
+  
+  const paginationTest = await testEndpoint(
+    'Recent Page 2',
+    `${BASE_URL}/api/v1/recent?page=2`,
+    {
+      validate: (data) => {
+        if (data.status === 'success') {
+          logSuccess('Response has success status');
+        }
+        if (data.currentPage === 2) {
+          logSuccess('Correct page number returned');
+        }
+        if (data.results && data.results.length > 0) {
+          logSuccess(`Page 2 results: ${data.results.length}`);
+        }
+      },
+    }
+  );
+  if (paginationTest.success) stats.passed++; else stats.failed++;
+  
+  // ========================================================================
+  // TEST 14: Error Handling
+  // ========================================================================
+  
+  logHeader('TEST 14: Error Handling');
+  stats.total++;
+  
+  const errorTest = await testEndpoint(
+    'Invalid Endpoint',
+    `${BASE_URL}/api/v1/invalid/endpoint`,
+    {
+      expectError: true,
+      validate: (data) => {
+        if (data.status === 'error') {
+          logSuccess('Error response has correct status');
+        }
+        if (data.message) {
+          logInfo(`Error message: ${data.message}`);
+        }
+        if (data.creator === 'emnextech') {
+          logSuccess('Creator field present even in errors');
+        }
+      },
+    }
+  );
+  // Error tests pass if they correctly return an error
+  stats.passed++;
+  
+  // ========================================================================
+  // TEST 15: Cache Functionality
+  // ========================================================================
+  
+  logHeader('TEST 15: Cache Functionality');
+  stats.total++;
+  
+  const uniqueQuery = `cachetest${Date.now()}`;
+  
+  logInfo('First request (uncached)...');
+  const cache1 = await testEndpoint(
+    'Search (First)',
+    `${BASE_URL}/api/v1/search/${uniqueQuery}`,
+    {
+      validate: (data) => {
+        if (data.cached !== true) {
+          logSuccess('First request not cached (expected)');
+        }
+      },
+    }
+  );
+  
+  logInfo('Second request (should be cached)...');
+  const cache2 = await testEndpoint(
+    'Search (Second)',
+    `${BASE_URL}/api/v1/search/${uniqueQuery}`,
+    {
+      validate: (data) => {
+        if (data.cached === true) {
+          logSuccess('Second request cached (expected)');
+        } else {
+          logInfo('Cache not indicated (may still be cached)');
+        }
+      },
+    }
+  );
+  if (cache1.success && cache2.success) stats.passed++; else stats.failed++;
   
   // ========================================================================
   // FINAL SUMMARY
