@@ -69,4 +69,13 @@ coverage/
 tmp/
 temp/
 
+# Downloaded images (local only)
+manga images/
 
+# Local scripts (not for public repo)
+download-popular.js
+download-posters.js
+
+# Frontend guides with sensitive info
+FRONTEND_GUIDE.md
+FRONTEND_INTEGRATION.md
