@@ -14,8 +14,8 @@ port = 8788
 local_protocol = "http"
 
 # Production settings
+# SECRET_TOKEN is set via: wrangler secret put SECRET_TOKEN --env production
 [env.production.vars]
-SECRET_TOKEN = "ce64c942306eeaa312863cbc415787afa99014b995f3e2fe2d8c892b91681f8f"
 ALLOWED_ORIGIN = "http://localhost:5173,https://manga-reader-theta-tawny.vercel.app"
 
 [env.production.observability]
