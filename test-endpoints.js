@@ -29,7 +29,7 @@
  * ============================================================================
  */
 
-const BASE_URL = process.env.API_URL || 'http://localhost:8788';
+const BASE_URL = process.env.API_URL || 'https://emnex-manga-api.ngwenyamae3118.workers.dev';
 
 // ============================================================================
 // CONSOLE STYLING

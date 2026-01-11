@@ -13,7 +13,13 @@ ALLOWED_ORIGIN = "*"
 port = 8788
 local_protocol = "http"
 
-# Production settings (optional)
-# [env.production]
-# SECRET_TOKEN = "your-production-secret"
-# ALLOWED_ORIGIN = "https://yourdomain.com"
+# Production settings
+[env.production.vars]
+SECRET_TOKEN = "ce64c942306eeaa312863cbc415787afa99014b995f3e2fe2d8c892b91681f8f"
+ALLOWED_ORIGIN = "http://localhost:5173,https://manga-reader-theta-tawny.vercel.app"
+
+[env.production.observability]
+enabled = true
+
+[env.staging.observability]
+enabled = true

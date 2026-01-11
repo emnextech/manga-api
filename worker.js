@@ -85,8 +85,19 @@ const DEFAULT_HEADERS = {
 // UTILITY FUNCTIONS
 // ============================================
 
-function corsHeaders(env) {
-  const allowedOrigin = env?.ALLOWED_ORIGIN || '*';
+function corsHeaders(env, requestOrigin = null) {
+  let allowedOrigin = env?.ALLOWED_ORIGIN || '*';
+  
+  // If multiple origins are configured (comma-separated), check if request origin is allowed
+  if (allowedOrigin.includes(',') && requestOrigin) {
+    const allowedOrigins = allowedOrigin.split(',').map(o => o.trim());
+    if (allowedOrigins.includes(requestOrigin)) {
+      allowedOrigin = requestOrigin;
+    } else {
+      allowedOrigin = allowedOrigins[0]; // Default to first allowed origin
+    }
+  }
+  
   return {
     'Access-Control-Allow-Origin': allowedOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -95,35 +106,37 @@ function corsHeaders(env) {
   };
 }
 
-function jsonResponse(data, status = 200, env = {}) {
+function jsonResponse(data, status = 200, env = {}, request = null) {
   // Always add creator field at the beginning
   const responseData = {
     creator: 'emnextech',
     ...data,
   };
+  const requestOrigin = request?.headers?.get('Origin');
   return new Response(JSON.stringify(responseData), {
     status,
     headers: {
       'Content-Type': 'application/json',
-      ...corsHeaders(env),
+      ...corsHeaders(env, requestOrigin),
     },
   });
 }
 
-function errorResponse(message, status = 500, env = {}) {
+function errorResponse(message, status = 500, env = {}, request = null) {
   return jsonResponse({
     status: 'error',
     message,
-  }, status, env);
+  }, status, env, request);
 }
 
 // HTML Response helper
-function htmlResponse(html, status = 200, env = {}) {
+function htmlResponse(html, status = 200, env = {}, request = null) {
+  const requestOrigin = request?.headers?.get('Origin');
   return new Response(html, {
     status,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      ...corsHeaders(env),
+      ...corsHeaders(env, requestOrigin),
     },
   });
 }
@@ -899,7 +912,7 @@ async function mangaRead(provider, chapterId) {
 // ROUTE HANDLERS
 // ============================================
 
-async function handleHome(env, baseUrl) {
+async function handleHome(env, baseUrl, request) {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1574,11 +1587,11 @@ async function handleHome(env, baseUrl) {
   </script>
 </body>
 </html>`;
-  return htmlResponse(html, 200, env);
+  return htmlResponse(html, 200, env, request);
 }
 
 // JSON API home endpoint - returns scraped home data from MangaPill
-async function handleApiHome(env) {
+async function handleApiHome(env, request) {
   const cacheKey = 'home';
   const now = Date.now();
   const cached = homeCache.get(cacheKey);
@@ -1589,7 +1602,7 @@ async function handleApiHome(env) {
       status: 'success',
       cached: true,
       ...cached.data 
-    }, 200, env);
+    }, 200, env, request);
   }
   
   try {
@@ -1615,7 +1628,7 @@ async function handleApiHome(env) {
     };
     
     homeCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', ...result }, 200, env);
+    return jsonResponse({ status: 'success', ...result }, 200, env, request);
   } catch (error) {
     // Return basic info on error
     return jsonResponse({
@@ -1635,11 +1648,11 @@ async function handleApiHome(env) {
         home: 'GET /api/v1/home',
         image: 'GET /api/v1/image?url={imageUrl}',
       },
-    }, 200, env);
+    }, 200, env, request);
   }
 }
 
-async function handleProviders(env) {
+async function handleProviders(env, request) {
   return jsonResponse({
     status: 'success',
     providers: Object.values(PROVIDERS).map(p => ({
@@ -1652,10 +1665,10 @@ async function handleProviders(env) {
         `GET /api/${p.id}/read/:chapterId`,
       ],
     })),
-  }, 200, env);
+  }, 200, env, request);
 }
 
-async function handleSearch(provider, query, url, env) {
+async function handleSearch(provider, query, url, env, request) {
   const urlObj = new URL(url);
   const page = parseInt(urlObj.searchParams.get('page')) || 1;
   const cacheKey = `search:${provider}:${query}:${page}`;
@@ -1663,56 +1676,56 @@ async function handleSearch(provider, query, url, env) {
   const cached = searchCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
   }
   
   try {
     const result = await mangaSearch(provider, query, page);
     searchCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider, query, page, ...result }, 200, env);
+    return jsonResponse({ status: 'success', provider, query, page, ...result }, 200, env, request);
   } catch (error) {
-    return errorResponse(error.message, 500, env);
+    return errorResponse(error.message, 500, env, request);
   }
 }
 
-async function handleInfo(provider, mangaId, url, env) {
+async function handleInfo(provider, mangaId, url, env, request) {
   const cacheKey = `info:${provider}:${mangaId}`;
   const now = Date.now();
   const cached = infoCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.info) {
-    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env);
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request);
   }
   
   try {
     const result = await mangaInfo(provider, mangaId);
     infoCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider, data: result }, 200, env);
+    return jsonResponse({ status: 'success', provider, data: result }, 200, env, request);
   } catch (error) {
-    return errorResponse(error.message, 500, env);
+    return errorResponse(error.message, 500, env, request);
   }
 }
 
-async function handleRead(provider, chapterId, url, env) {
+async function handleRead(provider, chapterId, url, env, request) {
   const cacheKey = `pages:${provider}:${chapterId}`;
   const now = Date.now();
   const cached = pagesCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.pages) {
-    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env);
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request);
   }
   
   try {
     const result = await mangaRead(provider, chapterId);
     pagesCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider, data: result }, 200, env);
+    return jsonResponse({ status: 'success', provider, data: result }, 200, env, request);
   } catch (error) {
-    return errorResponse(error.message, 500, env);
+    return errorResponse(error.message, 500, env, request);
   }
 }
 
 // MangaPill-specific handlers
-async function handleAdvancedSearch(url, env) {
+async function handleAdvancedSearch(url, env, request) {
   const urlObj = new URL(url);
   const query = urlObj.searchParams.get('q') || '';
   const genre = urlObj.searchParams.get('genre') || '';
@@ -1725,19 +1738,19 @@ async function handleAdvancedSearch(url, env) {
   const cached = searchCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
   }
   
   try {
     const result = await mangapillAdvancedSearch({ query, genre, type, status, page });
     searchCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env);
+    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request);
   } catch (error) {
-    return errorResponse(error.message, 500, env);
+    return errorResponse(error.message, 500, env, request);
   }
 }
 
-async function handleRecentChapters(url, env) {
+async function handleRecentChapters(url, env, request) {
   const urlObj = new URL(url);
   const page = parseInt(urlObj.searchParams.get('page')) || 1;
   
@@ -1746,19 +1759,19 @@ async function handleRecentChapters(url, env) {
   const cached = recentCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.recent) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
   }
   
   try {
     const result = await mangapillRecentChapters(page);
     recentCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env);
+    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request);
   } catch (error) {
-    return errorResponse(error.message, 500, env);
+    return errorResponse(error.message, 500, env, request);
   }
 }
 
-async function handleNewManga(url, env) {
+async function handleNewManga(url, env, request) {
   const urlObj = new URL(url);
   const page = parseInt(urlObj.searchParams.get('page')) || 1;
   
@@ -1767,28 +1780,28 @@ async function handleNewManga(url, env) {
   const cached = newMangaCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.new) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
   }
   
   try {
     const result = await mangapillNewManga(page);
     newMangaCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env);
+    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request);
   } catch (error) {
-    return errorResponse(error.message, 500, env);
+    return errorResponse(error.message, 500, env, request);
   }
 }
 
-async function handleRandomManga(env) {
+async function handleRandomManga(env, request) {
   try {
     const result = await mangapillRandom();
-    return jsonResponse({ status: 'success', provider: 'mangapill', data: result }, 200, env);
+    return jsonResponse({ status: 'success', provider: 'mangapill', data: result }, 200, env, request);
   } catch (error) {
-    return errorResponse(error.message, 500, env);
+    return errorResponse(error.message, 500, env, request);
   }
 }
 
-async function handleGenres(env) {
+async function handleGenres(env, request) {
   return jsonResponse({
     status: 'success',
     provider: 'mangapill',
@@ -1797,7 +1810,7 @@ async function handleGenres(env) {
       types: MANGAPILL_TYPES,
       statuses: MANGAPILL_STATUSES,
     },
-  }, 200, env);
+  }, 200, env, request);
 }
 
 // ============================================
@@ -1809,7 +1822,8 @@ export default {
     const url = new URL(request.url);
     
     if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders(env) });
+      const requestOrigin = request.headers.get('Origin');
+      return new Response(null, { headers: corsHeaders(env, requestOrigin) });
     }
     
     // All /api/v1/ endpoints are public
@@ -1818,43 +1832,43 @@ export default {
                      url.pathname.startsWith('/api/v1/');
     
     if (!isPublic && !validateRequest(request, env)) {
-      return errorResponse('Unauthorized access', 401, env);
+      return errorResponse('Unauthorized access', 401, env, request);
     }
     
     try {
       // Home endpoint - HTML page with testing buttons
       if (url.pathname === '/') {
-        return await handleHome(env, url.origin);
+        return await handleHome(env, url.origin, request);
       }
       
       // API home - JSON response
       if (url.pathname === '/api/v1/home') {
-        return await handleApiHome(env);
+        return await handleApiHome(env, request);
       }
       
       // Genres endpoint
       if (url.pathname === '/api/v1/genres') {
-        return await handleGenres(env);
+        return await handleGenres(env, request);
       }
       
       // Recent chapters
       if (url.pathname === '/api/v1/recent') {
-        return await handleRecentChapters(request.url, env);
+        return await handleRecentChapters(request.url, env, request);
       }
       
       // New manga
       if (url.pathname === '/api/v1/new') {
-        return await handleNewManga(request.url, env);
+        return await handleNewManga(request.url, env, request);
       }
       
       // Random manga
       if (url.pathname === '/api/v1/random') {
-        return await handleRandomManga(env);
+        return await handleRandomManga(env, request);
       }
       
       // Advanced search
       if (url.pathname === '/api/v1/advanced-search') {
-        return await handleAdvancedSearch(request.url, env);
+        return await handleAdvancedSearch(request.url, env, request);
       }
       
       // Image proxy for fast image loading
@@ -1872,30 +1886,30 @@ export default {
         // Route to appropriate handler (using mangapill as default provider)
         if (action === 'search') {
           const query = decodeURIComponent(param);
-          if (!query) return errorResponse('Search query is required', 400, env);
-          return await handleSearch('mangapill', query, request.url, env);
+          if (!query) return errorResponse('Search query is required', 400, env, request);
+          return await handleSearch('mangapill', query, request.url, env, request);
         }
         
         if (action === 'info') {
           const mangaId = decodeURIComponent(param);
-          if (!mangaId) return errorResponse('Manga ID is required', 400, env);
-          return await handleInfo('mangapill', mangaId, request.url, env);
+          if (!mangaId) return errorResponse('Manga ID is required', 400, env, request);
+          return await handleInfo('mangapill', mangaId, request.url, env, request);
         }
         
         if (action === 'read') {
           const chapterId = decodeURIComponent(param);
-          if (!chapterId) return errorResponse('Chapter ID is required', 400, env);
-          return await handleRead('mangapill', chapterId, request.url, env);
+          if (!chapterId) return errorResponse('Chapter ID is required', 400, env, request);
+          return await handleRead('mangapill', chapterId, request.url, env, request);
         }
         
-        return errorResponse(`Invalid action: ${action}. Valid actions: search, info, read`, 400, env);
+        return errorResponse(`Invalid action: ${action}. Valid actions: search, info, read`, 400, env, request);
       }
       
-      return errorResponse('Endpoint not found. Visit / for available endpoints.', 404, env);
+      return errorResponse('Endpoint not found. Visit / for available endpoints.', 404, env, request);
       
     } catch (error) {
       console.error('Worker error:', error);
-      return errorResponse(`Internal server error: ${error.message}`, 500, env);
+      return errorResponse(`Internal server error: ${error.message}`, 500, env, request);
     }
   },
 };
