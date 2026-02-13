@@ -7,7 +7,7 @@ A **Cloudflare Worker** that provides a fast, scalable REST API for manga conten
 
 ## 🌟 Features
 
-- **11 API Endpoints**: Search, info, read, recent, new, random, genres, advanced search, home, image proxy
+- **13 API Endpoints**: Search, info, read, recent, new, random, genres, advanced search, trending, browse, home, image proxy
 - **Fast Response**: In-memory caching with configurable TTL
 - **Image Proxy**: Cached image loading with 24h browser cache headers
 - **CORS Enabled**: Ready for web applications
@@ -31,8 +31,30 @@ All endpoints return JSON with `creator: "emnextech"` field.
 | `GET` | `/api/v1/new` | Newly added manga |
 | `GET` | `/api/v1/random` | Get a random manga |
 | `GET` | `/api/v1/genres` | Available genres, types, statuses |
-| `GET` | `/api/v1/advanced-search` | Search with filters |
+| `GET` | `/api/v1/advanced-search` | Search with filters (?q=&genre=&type=&status=&page=1) |
+| `GET` | `/api/v1/trending` | Trending/popular manga from Mangapill home |
+| `GET` | `/api/v1/browse` | Browse by genre (?genre=&type=&status=&page=1) |
 | `GET` | `/api/v1/image?url=...` | Image proxy with caching |
+
+### Manhwa Endpoints (Komikstation - komikstation.org)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/manhwa/popular` | Popular manhwa list (?page=1) |
+| `GET` | `/api/v1/manhwa/ongoing` | Ongoing manhwa (?page=1) |
+| `GET` | `/api/v1/manhwa/detail/:id` | Manhwa detail with chapters |
+| `GET` | `/api/v1/manhwa/chapter/:chapterId` | Chapter page images (e.g. nano-machine-chapter-1) |
+| `GET` | `/api/v1/manhwa/search/:query` | Search manhwa (?page=1) |
+| `GET` | `/api/v1/manhwa/genres` | Available genres |
+| `GET` | `/api/v1/manhwa/genre/:genreId` | Manhwa by genre (?page=1) |
+
+### ComicK Endpoints (comick.art - manga/manhwa/manhua)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/comick/search/:query` | Search manga/manhwa/manhua (?page=1) |
+| `GET` | `/api/v1/comick/info/:slug` | Comic detail with chapters |
+| `GET` | `/api/v1/comick/read/:chapterId` | Chapter page images |
 
 ## 🚀 Quick Start
 

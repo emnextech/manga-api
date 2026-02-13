@@ -7,6 +7,7 @@ yarn-error.log*
 # Wrangler
 .wrangler/
 dist/
+wrangler.toml
 
 # Cloudflare Workers binaries
 **/workerd.exe

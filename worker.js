@@ -38,11 +38,11 @@ const pagesCache = new Map();
 const recentCache = new Map();
 const newMangaCache = new Map();
 const homeCache = new Map();
-
-
+const manhwaCache = new Map();
+const comickCache = new Map();
 
 // ============================================
-// PROVIDERS CONFIGURATION
+// PROVIDERS CONFIGURATION (add comickCache above)
 // ============================================
 
 const PROVIDERS = {
@@ -56,6 +56,19 @@ const PROVIDERS = {
     name: 'MangaPill',
     baseUrl: 'https://mangapill.com',
     id: 'mangapill',
+    status: 'active',
+  },
+  KOMIKSTATION: {
+    name: 'Komikstation',
+    baseUrl: 'https://komikstation.org',
+    id: 'komikstation',
+    status: 'active',
+  },
+  COMICK: {
+    name: 'ComicK',
+    baseUrl: 'https://comick.art',
+    apiUrl: 'https://comick.art/api',
+    id: 'comick',
     status: 'active',
   },
   // Commented out until implemented
@@ -87,17 +100,15 @@ const DEFAULT_HEADERS = {
 
 function corsHeaders(env, requestOrigin = null) {
   let allowedOrigin = env?.ALLOWED_ORIGIN || '*';
-  
-  // If multiple origins are configured (comma-separated), check if request origin is allowed
-  if (allowedOrigin.includes(',') && requestOrigin) {
-    const allowedOrigins = allowedOrigin.split(',').map(o => o.trim());
-    if (allowedOrigins.includes(requestOrigin)) {
-      allowedOrigin = requestOrigin;
-    } else {
-      allowedOrigin = allowedOrigins[0]; // Default to first allowed origin
-    }
+  const norm = (o) => (o || '').trim().replace(/\/+$/, '');
+
+  if (allowedOrigin !== '*' && requestOrigin) {
+    const allowedOrigins = allowedOrigin.split(',').map(norm).filter(Boolean);
+    const origin = norm(requestOrigin);
+    if (allowedOrigins.includes(origin)) allowedOrigin = origin;
+    else if (allowedOrigins.length) allowedOrigin = allowedOrigins[0];
   }
-  
+
   return {
     'Access-Control-Allow-Origin': allowedOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -106,20 +117,23 @@ function corsHeaders(env, requestOrigin = null) {
   };
 }
 
-function jsonResponse(data, status = 200, env = {}, request = null) {
-  // Always add creator field at the beginning
-  const responseData = {
-    creator: 'emnextech',
-    ...data,
-  };
+// Cache-Control presets for API responses (browser + CDN caching)
+const CACHE_CONTROL = {
+  search: 'public, max-age=180, stale-while-revalidate=120',   // 3 min + 2 min revalidate
+  info: 'public, max-age=900, stale-while-revalidate=300',     // 15 min + 5 min revalidate
+  pages: 'public, max-age=1800, stale-while-revalidate=600',  // 30 min + 10 min revalidate
+  short: 'public, max-age=60, stale-while-revalidate=30',     // 1 min
+};
+
+function jsonResponse(data, status = 200, env = {}, request = null, options = {}) {
+  const responseData = { creator: 'emnextech', ...data };
   const requestOrigin = request?.headers?.get('Origin');
-  return new Response(JSON.stringify(responseData), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      ...corsHeaders(env, requestOrigin),
-    },
-  });
+  const headers = {
+    'Content-Type': 'application/json',
+    ...corsHeaders(env, requestOrigin),
+  };
+  if (options.cacheControl) headers['Cache-Control'] = options.cacheControl;
+  return new Response(JSON.stringify(responseData), { status, headers });
 }
 
 function errorResponse(message, status = 500, env = {}, request = null) {
@@ -142,24 +156,46 @@ function htmlResponse(html, status = 200, env = {}, request = null) {
 }
 
 function validateRequest(request, env, allowQueryToken = false) {
-  if (!env.SECRET_TOKEN) {
-    return true;
-  }
-
-  const authHeader = request.headers.get('X-Worker-Auth');
-  if (authHeader === env.SECRET_TOKEN) {
-    return true;
-  }
-
-  if (allowQueryToken) {
-    const url = new URL(request.url);
-    const queryToken = url.searchParams.get('token');
-    if (queryToken === env.SECRET_TOKEN) {
-      return true;
+  const norm = (o) => (o || '').trim().replace(/\/+$/, '');
+  const requestOrigin = request.headers.get('Origin');
+  
+  // Same-origin bypass first: requests from the API's own domain (e.g. docs page) skip origin + token
+  try {
+    const apiOrigin = new URL(request.url).origin;
+    if (requestOrigin && norm(requestOrigin) === norm(apiOrigin)) {
+      return { valid: true };
+    }
+  } catch (_) {}
+  
+  // Check 1: Validate Origin (if ALLOWED_ORIGIN is set and not wildcard)
+  const allowedOrigin = env?.ALLOWED_ORIGIN || '*';
+  if (allowedOrigin !== '*') {
+    const allowedOrigins = allowedOrigin.split(',').map(norm).filter(Boolean);
+    const origin = norm(requestOrigin);
+    if (requestOrigin && !allowedOrigins.includes(origin)) {
+      return { valid: false, reason: 'origin' };
     }
   }
 
-  return false;
+  // Check 2: Validate Token (if SECRET_TOKEN is set)
+  if (env.SECRET_TOKEN) {
+    const authHeader = request.headers.get('X-Worker-Auth');
+    if (authHeader === env.SECRET_TOKEN) {
+      return { valid: true };
+    }
+
+    if (allowQueryToken) {
+      const url = new URL(request.url);
+      const queryToken = url.searchParams.get('token');
+      if (queryToken === env.SECRET_TOKEN) {
+        return { valid: true };
+      }
+    }
+    
+    return { valid: false, reason: 'token' };
+  }
+
+  return { valid: true };
 }
 
 // ============================================
@@ -204,7 +240,9 @@ function extractAllMatches(html, regex) {
 // ============================================
 
 async function mangapillSearch(query, page = 1) {
-  const url = `https://mangapill.com/search?q=${encodeURIComponent(query)}`;
+  const params = new URLSearchParams({ q: query });
+  if (page > 1) params.append('page', page);
+  const url = `https://mangapill.com/search?${params.toString()}`;
   
   try {
     const response = await fetch(url, { headers: DEFAULT_HEADERS });
@@ -212,8 +250,8 @@ async function mangapillSearch(query, page = 1) {
     
     const results = [];
     
-    // Extract manga from search results
-    const mangaPattern = /<a\s+href="\/manga\/([^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<div[^>]*>([^<]+)<\/div>/gi;
+    // Extract manga from search results (support both src and data-src for lazy-loaded images)
+    const mangaPattern = /<a\s+href="\/manga\/([^"]+)"[^>]*>[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+)"[\s\S]*?<div[^>]*>([^<]+)<\/div>/gi;
     
     let match;
     while ((match = mangaPattern.exec(html)) !== null) {
@@ -230,9 +268,12 @@ async function mangapillSearch(query, page = 1) {
       });
     }
     
+    // Check for next page
+    const hasNextPage = html.includes(`page=${page + 1}"`);
+    
     return {
       currentPage: page,
-      hasNextPage: false,
+      hasNextPage,
       results,
     };
   } catch (error) {
@@ -353,8 +394,8 @@ async function mangapillAdvancedSearch(options = {}) {
     
     const results = [];
     
-    // Extract manga from search results
-    const mangaPattern = /<a\s+href="\/manga\/([^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[\s\S]*?<div[^>]*>([^<]+)<\/div>/gi;
+    // Extract manga from search results (support both src and data-src for lazy-loaded images)
+    const mangaPattern = /<a\s+href="\/manga\/([^"]+)"[^>]*>[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+)"[\s\S]*?<div[^>]*>([^<]+)<\/div>/gi;
     
     let match;
     while ((match = mangaPattern.exec(html)) !== null) {
@@ -642,6 +683,452 @@ async function mangapillHomeData() {
   }
 }
 
+// Get trending manga only (from home page)
+async function mangapillTrending() {
+  const homeData = await mangapillHomeData();
+  return homeData.trendingManga || [];
+}
+
+// ============================================
+// COMICK PROVIDER (comick.art - manga/manhwa/manhua)
+// ============================================
+
+const COMICK_HEADERS = {
+  ...DEFAULT_HEADERS,
+  'Accept': 'application/json',
+  'Referer': 'https://comick.art/',
+};
+
+async function comickSearch(query, page = 1) {
+  const cursor = page > 1 ? `&page=${page}` : '';
+  const url = `https://comick.art/api/search?q=${encodeURIComponent(query)}${cursor}`;
+  try {
+    const response = await fetch(url, { headers: COMICK_HEADERS });
+    const json = await response.json();
+    const data = json.data || [];
+    const results = data.map((m) => ({
+      id: m.slug,
+      title: m.title || m.slug,
+      altTitles: m.md_titles?.map((t) => t.title) || [],
+      image: m.default_thumbnail || (m.md_covers?.[0]?.b2key ? `https://meo.comick.pictures/${String(m.md_covers[0].b2key).replace(/^\/+/, '')}` : ''),
+      url: `https://comick.art/comic/${m.slug}`,
+      provider: 'ComicK',
+    }));
+    return {
+      currentPage: page,
+      hasNextPage: !!json.next_cursor,
+      results,
+      nextCursor: json.next_cursor || null,
+    };
+  } catch (error) {
+    console.error('ComicK search error:', error);
+    throw new Error(`ComicK search failed: ${error.message}`);
+  }
+}
+
+async function comickInfo(slug) {
+  const url = `https://comick.art/comic/${slug}`;
+  try {
+    const response = await fetch(url, { headers: COMICK_HEADERS });
+    const html = await response.text();
+    const scriptMatch = html.match(/<script[^>]*id=["']comic-data["'][^>]*>([\s\S]*?)<\/script>/i);
+    if (!scriptMatch) throw new Error('Comic data not found');
+    const data = JSON.parse(scriptMatch[1].trim());
+    const comicSlug = data.slug || '';
+    if (!comicSlug) throw new Error('Comic slug not found');
+    const chapterListUrl = `https://comick.art/api/comics/${comicSlug}/chapter-list?page=1`;
+    const chResponse = await fetch(chapterListUrl, { headers: COMICK_HEADERS });
+    const chJson = await chResponse.json();
+    const chapterData = chJson.data || [];
+    const chapters = chapterData.map((ch) => ({
+      id: `${data.slug}/${ch.hid}-chapter-${ch.chap}-${ch.lang || 'en'}`,
+      title: ch.title || ch.chap,
+      chapterNumber: ch.chap,
+      volumeNumber: ch.vol || '',
+      releaseDate: ch.created_at,
+      lang: ch.lang || 'en',
+    }));
+    const imageUrl = data.default_thumbnail;
+    const fullImage = imageUrl?.startsWith('http') ? imageUrl : imageUrl ? `https://meo.comick.pictures/${String(imageUrl).replace(/^\/+/, '')}` : null;
+    const altTitles = Array.isArray(data.md_titles) ? data.md_titles.map((t) => t?.title).filter(Boolean) : [];
+    const genres = Array.isArray(data.md_comic_md_genres) ? data.md_comic_md_genres.map((g) => g?.md_genres?.name).filter(Boolean) : [];
+    return {
+      id: data.slug,
+      title: data.title,
+      altTitles,
+      description: data.desc || data.parsed || '',
+      image: fullImage,
+      genres,
+      status: data.status === 0 ? 'ongoing' : 'completed',
+      chapters,
+      totalChapters: chapters.length,
+      provider: 'ComicK',
+      url: `https://comick.art/comic/${data.slug}`,
+    };
+  } catch (error) {
+    console.error('ComicK info error:', error);
+    throw new Error(`ComicK info failed: ${error.message}`);
+  }
+}
+
+async function comickChapter(chapterId) {
+  const url = `https://comick.art/api/comics/${chapterId}`;
+  try {
+    const response = await fetch(url, { headers: COMICK_HEADERS });
+    const json = await response.json();
+    const chapter = json.chapter || json.data?.chapter;
+    if (!chapter?.images) throw new Error('Chapter images not found');
+    const pages = chapter.images.map((img, i) => {
+      const imgUrl = typeof img === 'string' ? img : (img.url || (img.b2key ? `https://meo.comick.pictures/${String(img.b2key).replace(/^\/+/, '')}` : ''));
+      return { page: i + 1, img: imgUrl };
+    });
+    return {
+      chapterId,
+      title: chapter.title || chapter.chap || chapterId,
+      pages,
+      provider: 'ComicK',
+    };
+  } catch (error) {
+    console.error('ComicK chapter error:', error);
+    throw new Error(`ComicK chapter failed: ${error.message}`);
+  }
+}
+
+// ============================================
+// KOMIKSTATION PROVIDER (Manhwa - komikstation.org)
+// ============================================
+
+const KOMIKSTATION_HEADERS = {
+  ...DEFAULT_HEADERS,
+  'Referer': 'https://komikstation.org/',
+  'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+};
+
+async function komikstationManhwaPopular(page = 1) {
+  const url = page > 1
+    ? `https://komikstation.org/manga/?page=${page}&type=manhwa&order=popular`
+    : 'https://komikstation.org/manga/?type=manhwa&order=popular';
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(url, { headers: KOMIKSTATION_HEADERS, signal: controller.signal });
+    clearTimeout(timeoutId);
+    const html = await response.text();
+    const results = [];
+    // Use block-based parsing to avoid CPU-heavy regex on full HTML
+    const blocks = html.split(/<div[^>]*class="[^"]*bsx[^"]*"/i);
+    for (let i = 1; i < blocks.length && results.length < 50; i++) {
+      const block = blocks[i];
+      const linkMatch = block.match(/href="(https:\/\/komikstation\.org\/[^"]+)"|href="(\/[^"]+)"/i);
+      const imgMatch = block.match(/<img[^>]*src="([^"]+)"/i);
+      const titleMatch = block.match(/class="[^"]*tt[^"]*"[^>]*>([^<]+)</i) || block.match(/title="([^"]+)"/i);
+      const epMatch = block.match(/class="[^"]*epxs[^"]*"[^>]*>([^<]+)</i);
+      const rateMatch = block.match(/class="[^"]*numscore[^"]*"[^>]*>([^<]+)</i);
+      if (linkMatch && imgMatch) {
+        const href = linkMatch[1] || linkMatch[2] || '';
+        const mUrl = href.startsWith('http') ? href : `https://komikstation.org${href}`;
+        let mangaId = mUrl.includes('/manga/') ? mUrl.replace(/^https?:\/\/[^/]+\/manga\//, '').replace(/\/$/, '') : '';
+        if (!mangaId && mUrl.includes('-chapter-')) {
+          mangaId = mUrl.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '').replace(/-chapter-\d+(?:\.\d+)?.*$/i, '');
+        }
+        if (!mangaId) mangaId = mUrl.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+        results.push({
+          id: mangaId,
+          title: decodeHtmlEntities((titleMatch ? (titleMatch[1] || '').trim() : 'Unknown')),
+          image: imgMatch[1].startsWith('http') ? imgMatch[1] : `https://komikstation.org${imgMatch[1]}`,
+          link: mUrl,
+          latestChapter: epMatch ? epMatch[1].trim() : '',
+          rating: rateMatch ? rateMatch[1].trim() : '',
+          provider: 'Komikstation',
+        });
+      }
+    }
+    const hasNextPage = html.includes(`page=${page + 1}`);
+    return { currentPage: page, hasNextPage, results };
+  } catch (error) {
+    console.error('Komikstation manhwa popular error:', error);
+    throw new Error(`Failed to fetch manhwa popular: ${error.message}`);
+  }
+}
+
+async function komikstationManhwaOngoing(page = 1) {
+  const url = page > 1
+    ? `https://komikstation.org/manga/?page=${page}&status=ongoing&type=manhwa&order=`
+    : 'https://komikstation.org/manga/?status=ongoing&type=manhwa&order=';
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(url, { headers: KOMIKSTATION_HEADERS, signal: controller.signal });
+    clearTimeout(timeoutId);
+    const html = await response.text();
+    const results = [];
+    const blocks = html.split(/<div[^>]*class="[^"]*bs[^"]*"/i);
+    for (let i = 1; i < blocks.length && results.length < 50; i++) {
+      const block = blocks[i];
+      const linkMatch = block.match(/href="(https:\/\/komikstation\.org\/[^"]+)"|href="(\/[^"]+)"/);
+      const imgMatch = block.match(/<img[^>]*src="([^"]+)"/);
+      const titleMatch = block.match(/class="[^"]*tt[^"]*"[^>]*>([^<]+)</i) || block.match(/title="([^"]+)"/);
+      const epMatch = block.match(/class="[^"]*epxs[^"]*"[^>]*>([^<]+)</i);
+      const rateMatch = block.match(/class="[^"]*numscore[^"]*"[^>]*>([^<]+)</i);
+      if (linkMatch && imgMatch) {
+        const href = linkMatch[1] || linkMatch[2] || '';
+        const fullUrl = href.startsWith('http') ? href : `https://komikstation.org${href}`;
+        let mangaId = fullUrl.includes('/manga/') ? fullUrl.replace(/^https?:\/\/[^/]+\/manga\//, '').replace(/\/$/, '') : '';
+        if (!mangaId && fullUrl.includes('-chapter-')) {
+          mangaId = fullUrl.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '').replace(/-chapter-\d+(?:\.\d+)?.*$/i, '');
+        }
+        if (!mangaId) mangaId = fullUrl.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+        results.push({
+          id: mangaId,
+          title: decodeHtmlEntities((titleMatch ? (titleMatch[1] || '').trim() : 'Unknown')),
+          image: imgMatch[1].startsWith('http') ? imgMatch[1] : `https://komikstation.org${imgMatch[1]}`,
+          link: fullUrl,
+          latestChapter: epMatch ? epMatch[1].trim() : '',
+          rating: rateMatch ? rateMatch[1].trim() : '',
+          provider: 'Komikstation',
+        });
+      }
+    }
+    const hasNextPage = html.includes(`page=${page + 1}`);
+    return { currentPage: page, hasNextPage, results };
+  } catch (error) {
+    console.error('Komikstation manhwa ongoing error:', error);
+    throw new Error(`Failed to fetch manhwa ongoing: ${error.message}`);
+  }
+}
+
+async function komikstationManhwaDetail(manhwaId) {
+  const url = `https://komikstation.org/manga/${manhwaId}`;
+  try {
+    const response = await fetch(url, { headers: KOMIKSTATION_HEADERS });
+    const html = await response.text();
+    const ogTitleMatch = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/i);
+    const titleMatch = html.match(/class="[^"]*entry-title[^"]*"[^>]*>([^<]+)</i);
+    let title = (ogTitleMatch ? decodeHtmlEntities(ogTitleMatch[1].trim()) : '') ||
+      (titleMatch ? decodeHtmlEntities(titleMatch[1].trim()) : '');
+    if (!title || /^[\w-]+$/.test(title)) {
+      title = manhwaId.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+    const imgMatch = html.match(/class="[^"]*thumb[^"]*"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"/i);
+    const imageSrc = imgMatch ? imgMatch[1] : null;
+    const synopsisMatch = html.match(/class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+    const synopsis = synopsisMatch ? stripHtmlTags(synopsisMatch[1]).trim() : '';
+    const ratingMatch = html.match(/class="[^"]*num[^"]*"[^>]*>([^<]+)</i);
+    const rating = ratingMatch ? ratingMatch[1].trim() : '';
+    const genres = [];
+    const genreMatches = extractAllMatches(html, /<a[^>]*href="[^"]*genres\/[^"]*"[^>]*>([^<]+)<\/a>/gi);
+    const seenGenres = new Set();
+    genreMatches.forEach(g => {
+      const name = decodeHtmlEntities(g[1]).trim();
+      if (name && !seenGenres.has(name.toLowerCase())) {
+        seenGenres.add(name.toLowerCase());
+        genres.push({ genreName: name, genreLink: '' });
+      }
+    });
+    const chapters = [];
+    const chapterPattern = /<li[^>]*>[\s\S]*?<span[^>]*class="[^"]*chapternum[^"]*"[^>]*>([^<]*)<\/span>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>[\s\S]*?<span[^>]*class="[^"]*chapterdate[^"]*"[^>]*>([^<]*)<\/span>/gi;
+    let ch;
+    while ((ch = chapterPattern.exec(html)) !== null) {
+      const chapterLink = ch[2].replace(/^https?:\/\/[^/]+\//, '');
+      chapters.push({
+        chapterNum: ch[1].trim(),
+        chapterLink,
+        chapterDate: ch[3].trim(),
+      });
+    }
+    if (chapters.length === 0) {
+      const altChPattern = /<a[^>]*href="(https:\/\/komikstation\.org\/([^"]+))"[^>]*>[\s\S]*?chapter[^<]*<\/a>/gi;
+      let ach;
+      while ((ach = altChPattern.exec(html)) !== null) {
+        chapters.push({
+          chapterNum: ach[2].replace(/-chapter-\d+.*$/i, '').replace(/-/g, ' '),
+          chapterLink: ach[2],
+          chapterDate: '',
+        });
+      }
+    }
+    return {
+      id: manhwaId,
+      title,
+      imageSrc,
+      synopsis,
+      rating,
+      genres,
+      chapters,
+      totalChapters: chapters.length,
+      provider: 'Komikstation',
+      url: `https://komikstation.org/manga/${manhwaId}`,
+    };
+  } catch (error) {
+    console.error('Komikstation manhwa detail error:', error);
+    throw new Error(`Failed to fetch manhwa detail: ${error.message}`);
+  }
+}
+
+async function komikstationManhwaChapter(chapterId) {
+  // Resolve ddl?id=XXX (download link ID) to ?p=XXX - WordPress redirects to canonical chapter URL
+  let fetchUrl = `https://komikstation.org/${chapterId}`;
+  const ddlMatch = chapterId.match(/^ddl\?id=(\d+)$/i);
+  if (ddlMatch) {
+    fetchUrl = `https://komikstation.org/?p=${ddlMatch[1]}`;
+  }
+  try {
+    const response = await fetch(fetchUrl, { headers: KOMIKSTATION_HEADERS, redirect: 'follow' });
+    const html = await response.text();
+    const titleMatch = html.match(/<h1[^>]*class="[^"]*entry-title[^"]*"[^>]*>([^<]+)</i);
+    const title = titleMatch ? decodeHtmlEntities(titleMatch[1].trim()) : chapterId;
+    let images = [];
+    let prevChapter = null;
+    let nextChapter = null;
+    const scriptMatch = html.match(/ts_reader\.run\((.*?)\);\s*<\/script>/s);
+    if (scriptMatch) {
+      const jsonStr = scriptMatch[1].replace(/\\'/g, "'");
+      try {
+        const jsonObject = JSON.parse(jsonStr);
+        images = jsonObject?.sources?.[0]?.images || [];
+        prevChapter = jsonObject.prevUrl || null;
+        nextChapter = jsonObject.nextUrl || null;
+      } catch (_) {}
+    }
+    if (images.length === 0) {
+      const readerMatch = html.match(/<div[^>]*id=["']readerarea["'][^>]*>([\s\S]*?)<\/div>/i);
+      if (readerMatch) {
+        const imgMatches = readerMatch[1].matchAll(/<img[^>]*src=["']([^"']+)["']/gi);
+        for (const m of imgMatches) images.push(m[1]);
+      }
+    }
+    if (images.length === 0) throw new Error('Chapter images not found');
+    const pages = images.map((img, i) => ({ page: i + 1, img }));
+    const chapters = [];
+    const chapterOptionPattern = /<option[^>]*value="([^"]*)"[^>]*>([^<]+)<\/option>/gi;
+    let opt;
+    while ((opt = chapterOptionPattern.exec(html)) !== null) {
+      if (opt[2] && !opt[2].includes('Pilih')) {
+        chapters.push({ title: opt[2].trim(), url: opt[1] || null });
+      }
+    }
+    return {
+      title,
+      chapterId,
+      images: pages,
+      prevChapter,
+      nextChapter,
+      chapters,
+      provider: 'Komikstation',
+    };
+  } catch (error) {
+    console.error('Komikstation chapter error:', error);
+    throw new Error(`Failed to fetch chapter: ${error.message}`);
+  }
+}
+
+async function komikstationManhwaSearch(query, page = 1) {
+  const url = page > 1
+    ? `https://komikstation.org/page/${page}/?s=${encodeURIComponent(query)}`
+    : `https://komikstation.org/?s=${encodeURIComponent(query)}`;
+  try {
+    const response = await fetch(url, { headers: KOMIKSTATION_HEADERS });
+    const html = await response.text();
+    const results = [];
+    const blocks = html.split(/<div[^>]*class="[^"]*bs[^"]*"/i);
+    for (let i = 1; i < blocks.length; i++) {
+      const block = blocks[i];
+      const linkMatch = block.match(/href="(https:\/\/komikstation\.org\/[^"]+)"|href="(\/[^"]+)"/);
+      const imgMatch = block.match(/<img[^>]*src="([^"]+)"/);
+      const titleMatch = block.match(/title="([^"]+)"|class="[^"]*tt[^"]*"[^>]*>([^<]+)</i);
+      const epMatch = block.match(/class="[^"]*epxs[^"]*"[^>]*>([^<]+)</i);
+      const rateMatch = block.match(/class="[^"]*numscore[^"]*"[^>]*>([^<]+)</i);
+      if (linkMatch && imgMatch) {
+        const href = linkMatch[1] || linkMatch[2] || '';
+        const fullUrl = href.startsWith('http') ? href : `https://komikstation.org${href}`;
+        let mangaId = '';
+        if (fullUrl.includes('/manga/')) {
+          mangaId = fullUrl.replace(/^https?:\/\/[^/]+\/manga\//, '').replace(/\/$/, '');
+        } else {
+          const pathPart = fullUrl.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+          mangaId = pathPart.includes('-chapter-') ? pathPart.replace(/-chapter-\d+(?:\.\d+)?.*$/i, '') : pathPart;
+        }
+        if (!mangaId) continue;
+        results.push({
+          id: mangaId,
+          title: decodeHtmlEntities((titleMatch ? (titleMatch[1] || titleMatch[2] || '').trim() : 'Unknown')),
+          image: imgMatch[1].startsWith('http') ? imgMatch[1] : `https://komikstation.org${imgMatch[1]}`,
+          link: fullUrl,
+          latestChapter: epMatch ? epMatch[1].trim() : '',
+          rating: rateMatch ? rateMatch[1].trim() : '',
+          provider: 'Komikstation',
+        });
+      }
+    }
+    const hasNextPage = html.includes(`page=${page + 1}`);
+    return { currentPage: page, hasNextPage, results };
+  } catch (error) {
+    console.error('Komikstation search error:', error);
+    throw new Error(`Search failed: ${error.message}`);
+  }
+}
+
+async function komikstationManhwaGenres() {
+  const url = 'https://komikstation.org/manga/list-mode/';
+  try {
+    const response = await fetch(url, { headers: KOMIKSTATION_HEADERS });
+    const html = await response.text();
+    const genres = [];
+    const genrePattern = /<label[^>]*>([^<]+)<\/label>[\s\S]*?<input[^>]*value="([^"]+)"/gi;
+    let g;
+    while ((g = genrePattern.exec(html)) !== null) {
+      genres.push({ label: decodeHtmlEntities(g[1].trim()), value: g[2].trim() });
+    }
+    return { genres };
+  } catch (error) {
+    console.error('Komikstation genres error:', error);
+    throw new Error(`Failed to fetch genres: ${error.message}`);
+  }
+}
+
+async function komikstationManhwaByGenre(genreId, page = 1) {
+  const url = page > 1
+    ? `https://komikstation.org/genres/${genreId}/page/${page}`
+    : `https://komikstation.org/genres/${genreId}`;
+  try {
+    const response = await fetch(url, { headers: KOMIKSTATION_HEADERS });
+    const html = await response.text();
+    const results = [];
+    const blocks = html.split(/<div[^>]*class="[^"]*bs[^"]*"/i);
+    for (let i = 1; i < blocks.length; i++) {
+      const block = blocks[i];
+      const linkMatch = block.match(/href="(https:\/\/komikstation\.org\/[^"]+)"|href="(\/[^"]+)"/);
+      const imgMatch = block.match(/<img[^>]*src="([^"]+)"/);
+      const titleMatch = block.match(/title="([^"]+)"|class="[^"]*tt[^"]*"[^>]*>([^<]+)</i);
+      const epMatch = block.match(/class="[^"]*epxs[^"]*"[^>]*>([^<]+)</i);
+      const rateMatch = block.match(/class="[^"]*numscore[^"]*"[^>]*>([^<]+)</i);
+      if (linkMatch && imgMatch) {
+        const href = linkMatch[1] || linkMatch[2] || '';
+        const fullUrl = href.startsWith('http') ? href : `https://komikstation.org${href}`;
+        let mangaId = fullUrl.includes('/manga/') ? fullUrl.replace(/^https?:\/\/[^/]+\/manga\//, '').replace(/\/$/, '') : '';
+        if (!mangaId && fullUrl.includes('-chapter-')) {
+          mangaId = fullUrl.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '').replace(/-chapter-\d+(?:\.\d+)?.*$/i, '');
+        }
+        if (!mangaId) mangaId = fullUrl.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+        results.push({
+          id: mangaId,
+          title: decodeHtmlEntities((titleMatch ? (titleMatch[1] || titleMatch[2] || '').trim() : 'Unknown')),
+          image: imgMatch[1].startsWith('http') ? imgMatch[1] : `https://komikstation.org${imgMatch[1]}`,
+          link: fullUrl,
+          latestChapter: epMatch ? epMatch[1].trim() : '',
+          rating: rateMatch ? rateMatch[1].trim() : '',
+          provider: 'Komikstation',
+        });
+      }
+    }
+    const hasNextPage = html.includes(`page=${page + 1}`);
+    return { currentPage: page, hasNextPage, genreId, results };
+  } catch (error) {
+    console.error('Komikstation genre browse error:', error);
+    throw new Error(`Failed to fetch genre: ${error.message}`);
+  }
+}
+
 // ============================================
 // IMAGE PROXY (Fast image loading with caching)
 // ============================================
@@ -651,9 +1138,26 @@ const imageCache = new Map();
 const IMAGE_CACHE_DURATION = 3600000; // 1 hour
 const MAX_IMAGE_CACHE_SIZE = 100; // Max cached images
 
-async function proxyImage(imageUrl, env) {
+function getRefererForImageUrl(imageUrl) {
+  try {
+    const host = new URL(imageUrl).hostname.toLowerCase();
+    if (host.includes('mangapill') || host.includes('readdetectiveconan') || host.includes('cdn.mangapill')) {
+      return 'https://mangapill.com/';
+    }
+    if (host.includes('komikstation') || host.includes('klikcdn')) {
+      return 'https://komikstation.org/';
+    }
+    if (host.includes('comick') || host.includes('comicknew') || host.includes('comick.pictures')) {
+      return 'https://comick.art/';
+    }
+  } catch (_) {}
+  return 'https://mangapill.com/';
+}
+
+async function proxyImage(imageUrl, env, request = null) {
+  const cors = corsHeaders(env, request?.headers?.get('Origin'));
   if (!imageUrl) {
-    return new Response('Image URL is required', { status: 400 });
+    return new Response('Image URL is required', { status: 400, headers: cors });
   }
 
   try {
@@ -666,22 +1170,22 @@ async function proxyImage(imageUrl, env) {
           'Content-Type': cached.contentType,
           'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
           'X-Cache': 'HIT',
-          ...corsHeaders(env),
+          ...corsHeaders(env, request?.headers?.get('Origin')),
         },
       });
     }
 
-    // Fetch the image
+    const referer = getRefererForImageUrl(imageUrl);
     const response = await fetch(imageUrl, {
       headers: {
         'Accept': 'image/webp,image/avif,image/*,*/*;q=0.8',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://mangapill.com/',
+        'Referer': referer,
       },
     });
 
     if (!response.ok) {
-      return new Response(`Failed to fetch image: ${response.status}`, { status: response.status });
+      return new Response(`Failed to fetch image: ${response.status}`, { status: response.status, headers: cors });
     }
 
     const contentType = response.headers.get('Content-Type') || 'image/jpeg';
@@ -705,12 +1209,12 @@ async function proxyImage(imageUrl, env) {
         'Content-Type': contentType,
         'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
         'X-Cache': 'MISS',
-        ...corsHeaders(env),
+        ...corsHeaders(env, request?.headers?.get('Origin')),
       },
     });
   } catch (error) {
     console.error('Image proxy error:', error);
-    return new Response(`Image proxy error: ${error.message}`, { status: 500 });
+    return new Response(`Image proxy error: ${error.message}`, { status: 500, headers: cors });
   }
 }
 
@@ -1456,6 +1960,47 @@ async function handleHome(env, baseUrl, request) {
             <p class="endpoint-desc">Image proxy with caching. Fast image loading with 24h cache headers.</p>
             <button class="test-btn" onclick="testImageProxy()">Test: Image Proxy</button>
           </div>
+
+          <div class="endpoint">
+            <div class="endpoint-header">
+              <span class="method">GET</span>
+              <span class="endpoint-path">/api/v1/manhwa/popular</span>
+            </div>
+            <p class="endpoint-desc">Popular manhwa from Komikstation.</p>
+            <button class="test-btn" onclick="testEndpoint('/api/v1/manhwa/popular')">Test: Manhwa Popular</button>
+          </div>
+          <div class="endpoint">
+            <div class="endpoint-header">
+              <span class="method">GET</span>
+              <span class="endpoint-path">/api/v1/manhwa/ongoing</span>
+            </div>
+            <p class="endpoint-desc">Ongoing manhwa updates.</p>
+            <button class="test-btn" onclick="testEndpoint('/api/v1/manhwa/ongoing')">Test: Manhwa Ongoing</button>
+          </div>
+          <div class="endpoint">
+            <div class="endpoint-header">
+              <span class="method">GET</span>
+              <span class="endpoint-path">/api/v1/manhwa/genres</span>
+            </div>
+            <p class="endpoint-desc">List manhwa genres.</p>
+            <button class="test-btn" onclick="testEndpoint('/api/v1/manhwa/genres')">Test: Manhwa Genres</button>
+          </div>
+          <div class="endpoint">
+            <div class="endpoint-header">
+              <span class="method">GET</span>
+              <span class="endpoint-path">/api/v1/manhwa/detail/{id}</span>
+            </div>
+            <p class="endpoint-desc">Get manhwa details by ID.</p>
+            <button class="test-btn" onclick="testEndpoint('/api/v1/manhwa/detail/solo-leveling')">Test: Manhwa Detail</button>
+          </div>
+          <div class="endpoint">
+            <div class="endpoint-header">
+              <span class="method">GET</span>
+              <span class="endpoint-path">/api/v1/manhwa/search/{query}</span>
+            </div>
+            <p class="endpoint-desc">Search manhwa by title.</p>
+            <button class="test-btn" onclick="testEndpoint('/api/v1/manhwa/search/solo')">Test: Manhwa Search</button>
+          </div>
         </div>
       </div>
 
@@ -1596,13 +2141,8 @@ async function handleApiHome(env, request) {
   const now = Date.now();
   const cached = homeCache.get(cacheKey);
   
-  // Cache for 5 minutes
   if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
-    return jsonResponse({ 
-      status: 'success',
-      cached: true,
-      ...cached.data 
-    }, 200, env, request);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   }
   
   try {
@@ -1614,21 +2154,33 @@ async function handleApiHome(env, request) {
       provider: 'mangapill',
       ...homeData,
       endpoints: {
-        search: 'GET /api/v1/search/:query',
+        search: 'GET /api/v1/search/:query (?page=1)',
         info: 'GET /api/v1/info/:id',
         read: 'GET /api/v1/read/:chapterId',
-        recent: 'GET /api/v1/recent',
-        new: 'GET /api/v1/new',
+        recent: 'GET /api/v1/recent (?page=1)',
+        new: 'GET /api/v1/new (?page=1)',
         random: 'GET /api/v1/random',
         genres: 'GET /api/v1/genres',
-        advancedSearch: 'GET /api/v1/advanced-search',
+        advancedSearch: 'GET /api/v1/advanced-search (?q=&genre=&type=&status=&page=1)',
+        trending: 'GET /api/v1/trending',
+        browse: 'GET /api/v1/browse (?genre=&type=&status=&page=1)',
         home: 'GET /api/v1/home',
         image: 'GET /api/v1/image?url={imageUrl}',
+        manhwaPopular: 'GET /api/v1/manhwa/popular (?page=1)',
+        manhwaOngoing: 'GET /api/v1/manhwa/ongoing (?page=1)',
+        manhwaDetail: 'GET /api/v1/manhwa/detail/:id',
+        manhwaChapter: 'GET /api/v1/manhwa/chapter/:chapterId',
+        manhwaSearch: 'GET /api/v1/manhwa/search/:query (?page=1)',
+        manhwaGenres: 'GET /api/v1/manhwa/genres',
+        manhwaGenre: 'GET /api/v1/manhwa/genre/:genreId (?page=1)',
+        comickSearch: 'GET /api/v1/comick/search/:query (?page=1)',
+        comickInfo: 'GET /api/v1/comick/info/:slug',
+        comickRead: 'GET /api/v1/comick/read/:chapterId',
       },
     };
     
     homeCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', ...result }, 200, env, request);
+    return jsonResponse({ status: 'success', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   } catch (error) {
     // Return basic info on error
     return jsonResponse({
@@ -1676,13 +2228,13 @@ async function handleSearch(provider, query, url, env, request) {
   const cached = searchCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   }
   
   try {
     const result = await mangaSearch(provider, query, page);
     searchCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider, query, page, ...result }, 200, env, request);
+    return jsonResponse({ status: 'success', provider, query, page, ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   } catch (error) {
     return errorResponse(error.message, 500, env, request);
   }
@@ -1694,13 +2246,13 @@ async function handleInfo(provider, mangaId, url, env, request) {
   const cached = infoCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.info) {
-    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request);
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
   }
   
   try {
     const result = await mangaInfo(provider, mangaId);
     infoCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider, data: result }, 200, env, request);
+    return jsonResponse({ status: 'success', provider, data: result }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
   } catch (error) {
     return errorResponse(error.message, 500, env, request);
   }
@@ -1712,13 +2264,13 @@ async function handleRead(provider, chapterId, url, env, request) {
   const cached = pagesCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.pages) {
-    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request);
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.pages });
   }
   
   try {
     const result = await mangaRead(provider, chapterId);
     pagesCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider, data: result }, 200, env, request);
+    return jsonResponse({ status: 'success', provider, data: result }, 200, env, request, { cacheControl: CACHE_CONTROL.pages });
   } catch (error) {
     return errorResponse(error.message, 500, env, request);
   }
@@ -1738,13 +2290,13 @@ async function handleAdvancedSearch(url, env, request) {
   const cached = searchCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   }
   
   try {
     const result = await mangapillAdvancedSearch({ query, genre, type, status, page });
     searchCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request);
+    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   } catch (error) {
     return errorResponse(error.message, 500, env, request);
   }
@@ -1759,13 +2311,13 @@ async function handleRecentChapters(url, env, request) {
   const cached = recentCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.recent) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.short });
   }
   
   try {
     const result = await mangapillRecentChapters(page);
     recentCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request);
+    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.short });
   } catch (error) {
     return errorResponse(error.message, 500, env, request);
   }
@@ -1780,13 +2332,13 @@ async function handleNewManga(url, env, request) {
   const cached = newMangaCache.get(cacheKey);
   
   if (cached && now - cached.timestamp < CACHE_DURATIONS.new) {
-    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request);
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   }
   
   try {
     const result = await mangapillNewManga(page);
     newMangaCache.set(cacheKey, { data: result, timestamp: now });
-    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request);
+    return jsonResponse({ status: 'success', provider: 'mangapill', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
   } catch (error) {
     return errorResponse(error.message, 500, env, request);
   }
@@ -1795,7 +2347,7 @@ async function handleNewManga(url, env, request) {
 async function handleRandomManga(env, request) {
   try {
     const result = await mangapillRandom();
-    return jsonResponse({ status: 'success', provider: 'mangapill', data: result }, 200, env, request);
+    return jsonResponse({ status: 'success', provider: 'mangapill', data: result }, 200, env, request, { cacheControl: CACHE_CONTROL.short });
   } catch (error) {
     return errorResponse(error.message, 500, env, request);
   }
@@ -1810,7 +2362,200 @@ async function handleGenres(env, request) {
       types: MANGAPILL_TYPES,
       statuses: MANGAPILL_STATUSES,
     },
-  }, 200, env, request);
+  }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
+}
+
+async function handleTrending(env, request) {
+  const cacheKey = 'trending';
+  const now = Date.now();
+  const cached = homeCache.get(cacheKey);
+  
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
+    return jsonResponse({ status: 'success', cached: true, results: cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  }
+  
+  try {
+    const results = await mangapillTrending();
+    homeCache.set(cacheKey, { data: results, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'mangapill', results }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+// Manhwa (Komikstation) handlers
+async function handleManhwaPopular(requestUrl, env, request) {
+  const urlObj = new URL(requestUrl);
+  const page = parseInt(urlObj.searchParams.get('page')) || 1;
+  const cacheKey = `manhwa_popular:${page}`;
+  const now = Date.now();
+  const cached = manhwaCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  }
+  try {
+    const result = await komikstationManhwaPopular(page);
+    manhwaCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'komikstation', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleManhwaOngoing(requestUrl, env, request) {
+  const urlObj = new URL(requestUrl);
+  const page = parseInt(urlObj.searchParams.get('page')) || 1;
+  const cacheKey = `manhwa_ongoing:${page}`;
+  const now = Date.now();
+  const cached = manhwaCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  }
+  try {
+    const result = await komikstationManhwaOngoing(page);
+    manhwaCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'komikstation', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleManhwaDetail(manhwaId, env, request) {
+  const cacheKey = `manhwa_detail:${manhwaId}`;
+  const now = Date.now();
+  const cached = manhwaCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.info) {
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
+  }
+  try {
+    const result = await komikstationManhwaDetail(manhwaId);
+    manhwaCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'komikstation', data: result }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleManhwaChapter(chapterId, env, request) {
+  const cacheKey = `manhwa_chapter:${chapterId}`;
+  const now = Date.now();
+  const cached = manhwaCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.pages) {
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.pages });
+  }
+  try {
+    const result = await komikstationManhwaChapter(chapterId);
+    manhwaCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'komikstation', data: result }, 200, env, request, { cacheControl: CACHE_CONTROL.pages });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleManhwaSearch(requestUrl, env, request) {
+  const urlObj = new URL(requestUrl);
+  const pathAfter = urlObj.pathname.replace(/^\/api\/v1\/manhwa\/search\//, '');
+  const query = urlObj.searchParams.get('q') || decodeURIComponent(pathAfter || '');
+  const page = parseInt(urlObj.searchParams.get('page')) || 1;
+  const cacheKey = `manhwa_search:${query}:${page}`;
+  const now = Date.now();
+  const cached = manhwaCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  }
+  try {
+    const result = await komikstationManhwaSearch(query, page);
+    manhwaCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'komikstation', query, ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleManhwaGenres(env, request) {
+  const cacheKey = 'manhwa_genres';
+  const now = Date.now();
+  const cached = manhwaCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
+  }
+  try {
+    const result = await komikstationManhwaGenres();
+    manhwaCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'komikstation', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleComickSearch(requestUrl, env, request) {
+  const urlObj = new URL(requestUrl);
+  const pathAfter = urlObj.pathname.replace(/^\/api\/v1\/comick\/search\//, '').replace(/\/$/, '');
+  const query = urlObj.searchParams.get('q') || decodeURIComponent(pathAfter || '');
+  const page = parseInt(urlObj.searchParams.get('page')) || 1;
+  const cacheKey = `comick_search:${query}:${page}`;
+  const now = Date.now();
+  const cached = comickCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  }
+  try {
+    const result = await comickSearch(query, page);
+    comickCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'comick', query, ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleComickInfo(slug, env, request) {
+  const cacheKey = `comick_info:${slug}`;
+  const now = Date.now();
+  const cached = comickCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.info) {
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
+  }
+  try {
+    const result = await comickInfo(slug);
+    comickCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'comick', data: result }, 200, env, request, { cacheControl: CACHE_CONTROL.info });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleComickChapter(chapterId, env, request) {
+  const cacheKey = `comick_chapter:${chapterId}`;
+  const now = Date.now();
+  const cached = comickCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.pages) {
+    return jsonResponse({ status: 'success', cached: true, data: cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.pages });
+  }
+  try {
+    const result = await comickChapter(chapterId);
+    comickCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'comick', data: result }, 200, env, request, { cacheControl: CACHE_CONTROL.pages });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
+}
+
+async function handleManhwaGenre(genreId, requestUrl, env, request) {
+  const urlObj = new URL(requestUrl);
+  const page = parseInt(urlObj.searchParams.get('page')) || 1;
+  const cacheKey = `manhwa_genre:${genreId}:${page}`;
+  const now = Date.now();
+  const cached = manhwaCache.get(cacheKey);
+  if (cached && now - cached.timestamp < CACHE_DURATIONS.search) {
+    return jsonResponse({ status: 'success', cached: true, ...cached.data }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  }
+  try {
+    const result = await komikstationManhwaByGenre(genreId, page);
+    manhwaCache.set(cacheKey, { data: result, timestamp: now });
+    return jsonResponse({ status: 'success', provider: 'komikstation', ...result }, 200, env, request, { cacheControl: CACHE_CONTROL.search });
+  } catch (error) {
+    return errorResponse(error.message, 500, env, request);
+  }
 }
 
 // ============================================
@@ -1826,13 +2571,25 @@ export default {
       return new Response(null, { headers: corsHeaders(env, requestOrigin) });
     }
     
-    // All /api/v1/ endpoints are public
-    const publicEndpoints = ['/', '/api/v1/home', '/api/v1/genres', '/api/v1/recent', '/api/v1/new', '/api/v1/random', '/api/v1/advanced-search'];
-    const isPublic = publicEndpoints.includes(url.pathname) || 
-                     url.pathname.startsWith('/api/v1/');
+    // Public endpoints that don't require authentication
+    // - Root path (testing UI)
+    // - Image proxy (browser img tags can't send custom headers)
+    // - Prefetch (batch image cache warming)
+    const isPublicEndpoint = url.pathname === '/' || url.pathname === '/api/v1/image' || url.pathname === '/api/proxy/prefetch';
     
-    if (!isPublic && !validateRequest(request, env)) {
-      return errorResponse('Unauthorized access', 401, env, request);
+    // All other API endpoints require both origin AND token validation
+    if (!isPublicEndpoint) {
+      const validation = validateRequest(request, env, true);
+      if (!validation.valid) {
+        const errorMessages = {
+          origin: 'Access denied. Request origin not allowed.',
+          token: 'Unauthorized access. Valid authentication required.',
+        };
+        return jsonResponse({
+          error: 'NOTHING TO FIND HERE GO BACK',
+          message: errorMessages[validation.reason] || 'Access denied.',
+        }, 401, env, request);
+      }
     }
     
     try {
@@ -1866,15 +2623,82 @@ export default {
         return await handleRandomManga(env, request);
       }
       
-      // Advanced search
+      // Advanced search (also supports browse by genre: ?genre=Isekai&type=manga&status=publishing)
       if (url.pathname === '/api/v1/advanced-search') {
         return await handleAdvancedSearch(request.url, env, request);
       }
       
-      // Image proxy for fast image loading
+      // Trending manga (popular/trending list from Mangapill home)
+      if (url.pathname === '/api/v1/trending') {
+        return await handleTrending(env, request);
+      }
+      
+      // Browse by genre - alias for advanced-search with genre (e.g. ?genre=Action&page=1)
+      if (url.pathname === '/api/v1/browse') {
+        return await handleAdvancedSearch(request.url, env, request);
+      }
+      
+      // Image proxy for fast image loading (supports Mangapill, Komikstation, ComicK)
       if (url.pathname === '/api/v1/image') {
         const imageUrl = url.searchParams.get('url');
-        return await proxyImage(imageUrl, env);
+        return await proxyImage(imageUrl, env, request);
+      }
+      
+      // Prefetch: batch warm image cache (?urls=url1,url2,... - proxy URLs or raw image URLs)
+      if (url.pathname === '/api/proxy/prefetch') {
+        const urlsParam = url.searchParams.get('urls') || '';
+        const rawUrls = urlsParam.split(',').map(u => u.trim()).filter(Boolean).slice(0, 20);
+        const imageUrls = rawUrls.map(u => {
+          try {
+            const parsed = new URL(u);
+            const img = parsed.searchParams.get('url');
+            return img || (u.startsWith('http') ? u : null);
+          } catch (_) { return u.startsWith('http') ? u : null; }
+        }).filter(Boolean);
+        await Promise.all(imageUrls.map(imgUrl => proxyImage(imgUrl, env, request)));
+        return jsonResponse({ status: 'ok', count: imageUrls.length }, 200, env, request);
+      }
+      
+      // Manhwa endpoints (Komikstation - komikstation.org)
+      if (url.pathname === '/api/v1/manhwa/popular') {
+        return await handleManhwaPopular(request.url, env, request);
+      }
+      if (url.pathname === '/api/v1/manhwa/ongoing') {
+        return await handleManhwaOngoing(request.url, env, request);
+      }
+      if (url.pathname === '/api/v1/manhwa/genres') {
+        return await handleManhwaGenres(env, request);
+      }
+      if (url.pathname.startsWith('/api/v1/manhwa/detail/')) {
+        const manhwaId = decodeURIComponent(url.pathname.replace('/api/v1/manhwa/detail/', ''));
+        return await handleManhwaDetail(manhwaId, env, request);
+      }
+      if (url.pathname.startsWith('/api/v1/manhwa/chapter/')) {
+        const chapterId = decodeURIComponent(url.pathname.replace('/api/v1/manhwa/chapter/', ''));
+        return await handleManhwaChapter(chapterId, env, request);
+      }
+      if (url.pathname.startsWith('/api/v1/manhwa/genre/')) {
+        const parts = url.pathname.replace('/api/v1/manhwa/genre/', '').split('/');
+        const genreId = decodeURIComponent(parts[0] || '');
+        return await handleManhwaGenre(genreId, request.url, env, request);
+      }
+      if (url.pathname.startsWith('/api/v1/manhwa/search/')) {
+        const searchPath = url.pathname.replace('/api/v1/manhwa/search/', '');
+        const searchUrl = url.origin + '/api/v1/manhwa/search/' + searchPath + (url.search || '');
+        return await handleManhwaSearch(searchUrl, env, request);
+      }
+      
+      // ComicK endpoints (comick.art - manga/manhwa/manhua)
+      if (url.pathname.startsWith('/api/v1/comick/search/')) {
+        return await handleComickSearch(request.url, env, request);
+      }
+      if (url.pathname.startsWith('/api/v1/comick/info/')) {
+        const slug = decodeURIComponent(url.pathname.replace('/api/v1/comick/info/', ''));
+        return await handleComickInfo(slug, env, request);
+      }
+      if (url.pathname.startsWith('/api/v1/comick/read/')) {
+        const chapterId = decodeURIComponent(url.pathname.replace('/api/v1/comick/read/', ''));
+        return await handleComickChapter(chapterId, env, request);
       }
       
       // Parse /api/v1/:action/:param routes
