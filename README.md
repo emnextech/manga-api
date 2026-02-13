@@ -492,7 +492,7 @@ MIT License
 ## 🙏 Credits
 
 - Built with [Cloudflare Workers](https://workers.cloudflare.com/)
-- Manga source: [MangaPill](https://mangapill.com)
+
 
 ---
 
